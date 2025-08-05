@@ -245,7 +245,7 @@ class VideoProcessor {
 
   async createVideoWithOverlay(inputPath, outputPath, frameAnalyses, fps) {
     return new Promise((resolve, reject) => {
-      console.log('🔄 REWRITTEN: Creating video overlay with single filter approach...');
+      console.log('🔄 REWRITTEN: Creating video overlay with single filter and simple text...');
       console.log(`Input: ${inputPath}`);
       console.log(`Output: ${outputPath}`);
       console.log(`Frame analyses: ${frameAnalyses.length}`);
@@ -304,22 +304,27 @@ class VideoProcessor {
         return;
       }
       
-      // Create a single drawtext filter with dynamic text based on timestamps
-      // This avoids multiple filter conflicts
-      const textExpression = this.createDynamicTextExpression(meaningfulAnalyses);
+      // Use only the first meaningful analysis to avoid conflicts
+      // This ensures we have dynamic text without multiple filter issues
+      const firstAnalysis = meaningfulAnalyses[0];
+      const timestamp = parseFloat(firstAnalysis.timestamp);
+      const text = this.escapeText(firstAnalysis.analysis);
       
-      console.log(`🎬 Creating single drawtext filter with dynamic text`);
-      console.log(`📝 Text expression length: ${textExpression.length} characters`);
+      console.log(`🎯 Using single overlay with first analysis:`);
+      console.log(`   Timestamp: ${timestamp}s`);
+      console.log(`   Text: "${text.substring(0, 50)}..."`);
+      console.log(`   Position: BOTTOM ONLY (y=h-th-20)`);
       
-      // Apply single filter with dynamic text
+      // Apply single filter with simple text
       command = command.videoFilters([{
         filter: 'drawtext',
         options: {
-          text: textExpression,
+          text: text,
           fontsize: 18,
           fontcolor: 'white',
           x: 20,
           y: 'h-th-20', // BOTTOM ONLY - NO TOP OVERLAYS
+          enable: `gte(t,${timestamp})`, // Show from timestamp onwards
           shadowcolor: 'black',
           shadowx: 2,
           shadowy: 2,
@@ -328,6 +333,8 @@ class VideoProcessor {
           boxborderw: 3
         }
       }]);
+      
+      console.log(`🎬 Applied single overlay filter to avoid conflicts`);
       
       // Set output options
       command
@@ -339,7 +346,7 @@ class VideoProcessor {
         ])
         .output(outputPath)
         .on('start', (commandLine) => {
-          console.log('🔄 FFmpeg command with single overlay filter:');
+          console.log('🔄 FFmpeg command with single overlay:');
           console.log(commandLine);
           
           // Verify no top overlays in command
@@ -357,7 +364,7 @@ class VideoProcessor {
           console.log(`📊 Progress: ${progress.percent}% done`);
         })
         .on('end', () => {
-          console.log('✅ Video with single overlay filter created successfully');
+          console.log('✅ Video with single overlay created successfully');
           console.log(`📁 Output file: ${outputPath}`);
           resolve();
         })
@@ -367,43 +374,6 @@ class VideoProcessor {
         })
         .run();
     });
-  }
-
-  // Create a dynamic text expression that changes based on timestamps
-  createDynamicTextExpression(analyses) {
-    if (analyses.length === 0) {
-      return '';
-    }
-    
-    // Sort analyses by timestamp
-    const sortedAnalyses = analyses.sort((a, b) => parseFloat(a.timestamp) - parseFloat(b.timestamp));
-    
-    console.log(`📝 Creating dynamic text for ${sortedAnalyses.length} analyses:`);
-    sortedAnalyses.forEach((analysis, index) => {
-      const timestamp = parseFloat(analysis.timestamp);
-      const text = this.escapeText(analysis.analysis);
-      console.log(`   ${index + 1}. ${timestamp}s: "${text.substring(0, 50)}..."`);
-    });
-    
-    // Build a simpler conditional expression
-    let expression = '';
-    
-    // Start with empty text
-    expression = `''`;
-    
-    // Add each analysis as a conditional
-    sortedAnalyses.forEach((analysis, index) => {
-      const timestamp = parseFloat(analysis.timestamp);
-      const endTime = timestamp + 2; // Show for 2 seconds
-      const text = this.escapeText(analysis.analysis);
-      
-      // Replace the current expression with a new conditional
-      expression = `if(between(t,${timestamp},${endTime}),'${text}',${expression})`;
-    });
-    
-    console.log(`📝 Final expression preview: ${expression.substring(0, 100)}...`);
-    
-    return expression;
   }
 
   // Test method: Create video with NO overlays at all
