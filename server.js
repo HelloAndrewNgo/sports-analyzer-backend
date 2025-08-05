@@ -83,13 +83,15 @@ app.post('/api/analyze-video', upload.single('video'), async (req, res) => {
     const videoPath = req.file.path;
     const prompt = req.body.prompt || 'Analyze this sports video and provide feedback on performance, technique, and areas for improvement.';
     const fps = parseInt(req.body.fps) || 1;
+    const testMode = req.body.testMode === 'true' || req.body.testMode === true;
 
     console.log(`Processing video: ${req.file.originalname}`);
     console.log(`Prompt: ${prompt}`);
     console.log(`FPS: ${fps}`);
+    console.log(`Test mode: ${testMode}`);
 
     // Process the video and get analysis
-    const result = await videoProcessor.processVideo(videoPath, prompt, fps);
+    const result = await videoProcessor.processVideo(videoPath, prompt, fps, testMode);
 
     clearTimeout(requestTimeout);
     

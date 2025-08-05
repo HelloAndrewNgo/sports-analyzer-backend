@@ -17,10 +17,42 @@ class VideoProcessor {
     fs.ensureDirSync(this.tempDir);
   }
 
-  async processVideo(videoPath, prompt, fps = 1) {
+  async processVideo(videoPath, prompt, fps = 1, testMode = false) {
     try {
       console.log('Starting video processing...');
+      console.log(`Test mode: ${testMode ? 'ON' : 'OFF'}`);
       
+      if (testMode) {
+        // Test mode: return the original video file without any processing
+        console.log('🧪 Test mode: Returning original video file without processing');
+        
+        // Copy the original file to the processed directory
+        const outputVideoPath = path.join(config.PROCESSED_DIR, `original-${uuidv4()}.mp4`);
+        await fs.copy(videoPath, outputVideoPath);
+        console.log('✅ Original video copied for test mode');
+        
+        return {
+          processedVideoPath: outputVideoPath,
+          analysis: [],
+          feedback: "Test mode - original video returned without processing"
+        };
+      }
+      
+      // Check if this is a no-overlay test
+      const noOverlayTest = prompt.includes('NO_OVERLAY_TEST');
+      if (noOverlayTest) {
+        console.log('🧪 NO OVERLAY TEST: Creating video with absolutely no overlays');
+        const outputVideoPath = path.join(config.PROCESSED_DIR, `no-overlay-test-${uuidv4()}.mp4`);
+        await this.createVideoWithNoOverlays(videoPath, outputVideoPath);
+        
+        return {
+          processedVideoPath: outputVideoPath,
+          analysis: [],
+          feedback: "No overlay test - video created with absolutely no overlays"
+        };
+      }
+      
+      // Normal mode: proceed with frame extraction and analysis
       // Extract video info
       const videoInfo = await this.getVideoInfo(videoPath);
       console.log('Video info:', videoInfo);
@@ -46,8 +78,11 @@ class VideoProcessor {
 
       console.log(`Processing ${sortedFrames.length} frames (limited from ${frameFiles.length} total)`);
 
+      let frameAnalyses = [];
+      
+      // Normal mode: analyze frames
       // Analyze each frame with Claude (with timeout)
-      const frameAnalyses = [];
+      frameAnalyses = [];
       for (let i = 0; i < sortedFrames.length; i++) {
         const framePath = path.join(framesDir, sortedFrames[i]);
         const frameBase64 = await this.imageToBase64(framePath);
@@ -92,16 +127,24 @@ class VideoProcessor {
       console.log('\n--- Creating Video with Overlay ---');
       const outputVideoPath = path.join(config.PROCESSED_DIR, `processed-${uuidv4()}.mp4`);
       
-      // First create a clean copy of the video without any overlays
-      const cleanVideoPath = path.join(config.PROCESSED_DIR, `clean-${uuidv4()}.mp4`);
-      await this.createCleanVideo(videoPath, cleanVideoPath);
-      
-      // Then add our feedback overlays to the clean video
-      await this.createVideoWithOverlay(cleanVideoPath, outputVideoPath, frameAnalyses, fps);
-      console.log('✅ Final video created with overlay');
-      
-      // Clean up the temporary clean video
-      await fs.remove(cleanVideoPath);
+      if (testMode) {
+        // Test mode: just create a clean copy without any overlays
+        console.log('🧪 Test mode: Creating clean video without overlays');
+        await this.createCleanVideo(videoPath, outputVideoPath);
+        console.log('✅ Clean video created for test mode');
+      } else {
+        // Normal mode: create video with overlays
+        // First create a clean copy of the video without any overlays
+        const cleanVideoPath = path.join(config.PROCESSED_DIR, `clean-${uuidv4()}.mp4`);
+        await this.createCleanVideo(videoPath, cleanVideoPath);
+        
+        // Then add our feedback overlays to the clean video
+        await this.createVideoWithOverlay(cleanVideoPath, outputVideoPath, frameAnalyses, fps);
+        console.log('✅ Final video created with overlay');
+        
+        // Clean up the temporary clean video
+        await fs.remove(cleanVideoPath);
+      }
 
       // Cleanup temp files
       await fs.remove(framesDir);
@@ -179,8 +222,7 @@ class VideoProcessor {
           '-crf 23',
           '-preset fast',
           '-map_metadata -1', // Remove all metadata
-          '-an', // Remove audio
-          '-vf', 'metadata=mode=delete' // Remove all metadata that might cause overlays
+          '-an' // Remove audio
         ])
         .output(outputPath)
         .on('start', (commandLine) => {
@@ -203,49 +245,91 @@ class VideoProcessor {
 
   async createVideoWithOverlay(inputPath, outputPath, frameAnalyses, fps) {
     return new Promise((resolve, reject) => {
-      console.log(`Creating video overlay with ${frameAnalyses.length} frame analyses...`);
+      console.log('🔄 REWRITTEN: Creating video overlay with single filter approach...');
+      console.log(`Input: ${inputPath}`);
+      console.log(`Output: ${outputPath}`);
+      console.log(`Frame analyses: ${frameAnalyses.length}`);
       
+      // Start with a clean FFmpeg command
       let command = ffmpeg(inputPath);
-
-      // Build a complex filter chain to remove any existing overlays and add only our feedback
-      let filterChain = [];
       
-      // Add text overlay for each frame with improved styling
-      frameAnalyses.forEach((analysis, index) => {
+      // Filter out meaningful analyses only
+      const meaningfulAnalyses = frameAnalyses.filter(analysis => {
+        const text = analysis.analysis || '';
         const timestamp = parseFloat(analysis.timestamp);
-        const text = this.escapeText(analysis.analysis);
         
-        console.log(`Adding overlay for frame ${index + 1} at ${timestamp}s`);
+        // Only include if:
+        // 1. Has meaningful text (not empty, not error messages)
+        // 2. Not at the very beginning (timestamp > 0.5)
+        // 3. Text is long enough to be meaningful
+        const isValid = text.length > 20 && 
+                       timestamp > 0.5 && 
+                       !text.toLowerCase().includes('analysis failed') &&
+                       !text.toLowerCase().includes('unable to analyze');
         
-        // Only show feedback if there's meaningful content and not at the very beginning
-        if (text && text.length > 10 && timestamp > 0.5) {
-          // Filter out generic or failed analysis responses
-          const meaningfulText = this.isMeaningfulFeedback(text);
-          if (meaningfulText) {
-            // Add drawtext filter to the chain
-            filterChain.push({
-              filter: 'drawtext',
-              options: {
-                text: meaningfulText,
-                fontsize: 18,
-                fontcolor: 'white',
-                x: 25,
-                y: 'h-th-35',
-                enable: `between(t,${timestamp},${timestamp + 2})`, // Show for 2 seconds
-                shadowcolor: 'black',
-                shadowx: 2,
-                shadowy: 2
-              }
-            });
-          }
+        if (isValid) {
+          console.log(`✅ Including analysis at ${timestamp}s: "${text.substring(0, 50)}..."`);
+        } else {
+          console.log(`❌ Skipping analysis at ${timestamp}s: "${text.substring(0, 30)}..."`);
         }
+        
+        return isValid;
       });
-
-      // Apply the filter chain if we have any overlays to add
-      if (filterChain.length > 0) {
-        command = command.videoFilters(filterChain);
+      
+      console.log(`📊 Filtered to ${meaningfulAnalyses.length} meaningful analyses out of ${frameAnalyses.length} total`);
+      
+      // If no meaningful analyses, just copy the video without any overlays
+      if (meaningfulAnalyses.length === 0) {
+        console.log('⚠️ No meaningful analyses found - creating clean video copy');
+        command
+          .outputOptions([
+            '-c:v libx264',
+            '-pix_fmt yuv420p',
+            '-crf 23',
+            '-preset fast'
+          ])
+          .output(outputPath)
+          .on('start', (commandLine) => {
+            console.log('🔄 Clean video command:', commandLine);
+          })
+          .on('end', () => {
+            console.log('✅ Clean video created successfully');
+            resolve();
+          })
+          .on('error', (err) => {
+            console.error('❌ Clean video error:', err);
+            reject(err);
+          })
+          .run();
+        return;
       }
-
+      
+      // Create a single drawtext filter with dynamic text based on timestamps
+      // This avoids multiple filter conflicts
+      const textExpression = this.createDynamicTextExpression(meaningfulAnalyses);
+      
+      console.log(`🎬 Creating single drawtext filter with dynamic text`);
+      console.log(`📝 Text expression length: ${textExpression.length} characters`);
+      
+      // Apply single filter with dynamic text
+      command = command.videoFilters([{
+        filter: 'drawtext',
+        options: {
+          text: textExpression,
+          fontsize: 18,
+          fontcolor: 'white',
+          x: 20,
+          y: 'h-th-20', // BOTTOM ONLY - NO TOP OVERLAYS
+          shadowcolor: 'black',
+          shadowx: 2,
+          shadowy: 2,
+          box: 1,
+          boxcolor: 'black@0.8',
+          boxborderw: 3
+        }
+      }]);
+      
+      // Set output options
       command
         .outputOptions([
           '-c:v libx264',
@@ -255,17 +339,99 @@ class VideoProcessor {
         ])
         .output(outputPath)
         .on('start', (commandLine) => {
-          console.log('FFmpeg command started:', commandLine);
+          console.log('🔄 FFmpeg command with single overlay filter:');
+          console.log(commandLine);
+          
+          // Verify no top overlays in command
+          if (commandLine.includes('y=0') || commandLine.includes('y=10') || commandLine.includes('y=20')) {
+            console.error('🚨 WARNING: Found top positioning in FFmpeg command!');
+          } else {
+            console.log('✅ Confirmed: No top positioning found in command');
+          }
+          
+          // Verify single filter approach
+          const drawtextCount = (commandLine.match(/drawtext/g) || []).length;
+          console.log(`🔍 Drawtext filters found: ${drawtextCount} (should be 1)`);
         })
         .on('progress', (progress) => {
-          console.log(`FFmpeg progress: ${progress.percent}% done`);
+          console.log(`📊 Progress: ${progress.percent}% done`);
         })
         .on('end', () => {
-          console.log('FFmpeg processing completed successfully');
+          console.log('✅ Video with single overlay filter created successfully');
+          console.log(`📁 Output file: ${outputPath}`);
           resolve();
         })
         .on('error', (err) => {
-          console.error('FFmpeg error:', err);
+          console.error('❌ FFmpeg error:', err);
+          reject(err);
+        })
+        .run();
+    });
+  }
+
+  // Create a dynamic text expression that changes based on timestamps
+  createDynamicTextExpression(analyses) {
+    if (analyses.length === 0) {
+      return '';
+    }
+    
+    // Sort analyses by timestamp
+    const sortedAnalyses = analyses.sort((a, b) => parseFloat(a.timestamp) - parseFloat(b.timestamp));
+    
+    console.log(`📝 Creating dynamic text for ${sortedAnalyses.length} analyses:`);
+    sortedAnalyses.forEach((analysis, index) => {
+      const timestamp = parseFloat(analysis.timestamp);
+      const text = this.escapeText(analysis.analysis);
+      console.log(`   ${index + 1}. ${timestamp}s: "${text.substring(0, 50)}..."`);
+    });
+    
+    // Build a simpler conditional expression
+    let expression = '';
+    
+    // Start with empty text
+    expression = `''`;
+    
+    // Add each analysis as a conditional
+    sortedAnalyses.forEach((analysis, index) => {
+      const timestamp = parseFloat(analysis.timestamp);
+      const endTime = timestamp + 2; // Show for 2 seconds
+      const text = this.escapeText(analysis.analysis);
+      
+      // Replace the current expression with a new conditional
+      expression = `if(between(t,${timestamp},${endTime}),'${text}',${expression})`;
+    });
+    
+    console.log(`📝 Final expression preview: ${expression.substring(0, 100)}...`);
+    
+    return expression;
+  }
+
+  // Test method: Create video with NO overlays at all
+  async createVideoWithNoOverlays(inputPath, outputPath) {
+    return new Promise((resolve, reject) => {
+      console.log('🧪 TEST: Creating video with NO overlays at all...');
+      
+      ffmpeg(inputPath)
+        .outputOptions([
+          '-c:v libx264',
+          '-pix_fmt yuv420p',
+          '-crf 23',
+          '-preset fast',
+          '-map_metadata -1' // Remove all metadata
+        ])
+        .output(outputPath)
+        .on('start', (commandLine) => {
+          console.log('🧪 TEST: FFmpeg command (no overlays):', commandLine);
+        })
+        .on('progress', (progress) => {
+          console.log(`🧪 TEST: FFmpeg progress: ${progress.percent}% done`);
+        })
+        .on('end', () => {
+          console.log('🧪 TEST: Video created with NO overlays');
+          resolve();
+        })
+        .on('error', (err) => {
+          console.error('🧪 TEST: FFmpeg error:', err);
           reject(err);
         })
         .run();
@@ -273,53 +439,21 @@ class VideoProcessor {
   }
 
   escapeText(text) {
-    // Escape special characters for FFmpeg and format text for better readability
+    if (!text || typeof text !== 'string') {
+      return '';
+    }
+    
+    // Clean and escape text for FFmpeg drawtext filter
     return text
-      .replace(/:/g, '\\:')
-      .replace(/'/g, "\\'")
-      .replace(/"/g, '\\"')
-      .replace(/\n/g, ' ')
-      .substring(0, 150) // Limit text length for better fit
+      .replace(/:/g, '\\:')           // Escape colons
+      .replace(/'/g, "\\'")           // Escape single quotes
+      .replace(/"/g, '\\"')           // Escape double quotes
+      .replace(/\n/g, ' ')            // Replace newlines with spaces
+      .replace(/\r/g, ' ')            // Replace carriage returns with spaces
+      .replace(/\t/g, ' ')            // Replace tabs with spaces
+      .replace(/\s+/g, ' ')           // Replace multiple spaces with single space
+      .substring(0, 120)              // Limit length for better fit
       .trim();
-  }
-
-  isMeaningfulFeedback(text) {
-    // Filter out generic or failed responses
-    const genericPhrases = [
-      'analysis failed',
-      'unable to analyze',
-      'no clear action',
-      'frame appears static',
-      'no significant movement',
-      'unclear what is happening'
-    ];
-    
-    const lowerText = text.toLowerCase();
-    
-    // Check if text contains generic phrases
-    for (const phrase of genericPhrases) {
-      if (lowerText.includes(phrase)) {
-        return null;
-      }
-    }
-    
-    // Check if text is too short or too generic
-    if (text.length < 20) {
-      return null;
-    }
-    
-    // Check if text contains actual feedback keywords
-    const feedbackKeywords = [
-      'good', 'great', 'excellent', 'improve', 'better', 'technique',
-      'form', 'stance', 'movement', 'shot', 'pass', 'dribble',
-      'defense', 'offense', 'position', 'balance', 'timing'
-    ];
-    
-    const hasFeedbackKeywords = feedbackKeywords.some(keyword => 
-      lowerText.includes(keyword)
-    );
-    
-    return hasFeedbackKeywords ? text : null;
   }
 
   summarizeFeedback(frameAnalyses) {
