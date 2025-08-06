@@ -107,11 +107,48 @@ class VideoProcessor {
             ? await this.withTimeout(claudeService.analyzeFrameDev(frameBase64, framePrompt), 10000) // 10 second timeout
             : await this.withTimeout(claudeService.analyzeFrame(frameBase64, framePrompt), 30000); // 30 second timeout
           
-          frameAnalyses.push({
-            frame: sortedFrames[i],
-            timestamp: (i / fps).toFixed(2),
-            analysis: analysis
-          });
+          // Parse structured JSON response if in dev mode
+          let processedAnalysis = analysis;
+          if (config.DEV_MODE) {
+            try {
+              const parsedAnalysis = JSON.parse(analysis);
+              if (parsedAnalysis.shots && parsedAnalysis.shots.length > 0) {
+                // Extract the most relevant shot feedback for this frame
+                const relevantShot = parsedAnalysis.shots[parsedAnalysis.shots.length - 1]; // Get the latest shot
+                processedAnalysis = relevantShot.feedback || "No specific feedback available";
+                
+                // Store the full structured data for potential future use
+                frameAnalyses.push({
+                  frame: sortedFrames[i],
+                  timestamp: (i / fps).toFixed(2),
+                  analysis: processedAnalysis,
+                  structuredData: parsedAnalysis // Store the full JSON data
+                });
+              } else {
+                processedAnalysis = "No shot data available";
+                frameAnalyses.push({
+                  frame: sortedFrames[i],
+                  timestamp: (i / fps).toFixed(2),
+                  analysis: processedAnalysis
+                });
+              }
+            } catch (parseError) {
+              console.log('Failed to parse JSON response, using as plain text');
+              frameAnalyses.push({
+                frame: sortedFrames[i],
+                timestamp: (i / fps).toFixed(2),
+                analysis: analysis
+              });
+            }
+          } else {
+            // Normal mode: use plain text response
+            frameAnalyses.push({
+              frame: sortedFrames[i],
+              timestamp: (i / fps).toFixed(2),
+              analysis: analysis
+            });
+          }
+          
           console.log(`✅ Frame ${i + 1}/${sortedFrames.length} processed successfully`);
         } catch (error) {
           console.error(`❌ Error analyzing frame ${i + 1}:`, error.message);
@@ -245,7 +282,7 @@ class VideoProcessor {
 
   async createVideoWithOverlay(inputPath, outputPath, frameAnalyses, fps) {
     return new Promise((resolve, reject) => {
-      console.log('🔄 REWRITTEN: Creating video overlay with single filter and simple text...');
+      console.log('🔄 Creating video with dynamic timestamp-based overlays...');
       console.log(`Input: ${inputPath}`);
       console.log(`Output: ${outputPath}`);
       console.log(`Frame analyses: ${frameAnalyses.length}`);
@@ -258,10 +295,6 @@ class VideoProcessor {
         const text = analysis.analysis || '';
         const timestamp = parseFloat(analysis.timestamp);
         
-        // Only include if:
-        // 1. Has meaningful text (not empty, not error messages)
-        // 2. Not at the very beginning (timestamp > 0.5)
-        // 3. Text is long enough to be meaningful
         const isValid = text.length > 20 && 
                        timestamp > 0.5 && 
                        !text.toLowerCase().includes('analysis failed') &&
@@ -282,89 +315,65 @@ class VideoProcessor {
       if (meaningfulAnalyses.length === 0) {
         console.log('⚠️ No meaningful analyses found - creating clean video copy');
         command
-          .outputOptions([
-            '-c:v libx264',
-            '-pix_fmt yuv420p',
-            '-crf 23',
-            '-preset fast'
-          ])
+          .outputOptions(['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'fast'])
           .output(outputPath)
-          .on('start', (commandLine) => {
-            console.log('🔄 Clean video command:', commandLine);
-          })
-          .on('end', () => {
-            console.log('✅ Clean video created successfully');
-            resolve();
-          })
-          .on('error', (err) => {
-            console.error('❌ Clean video error:', err);
-            reject(err);
-          })
+          .on('end', resolve)
+          .on('error', reject)
           .run();
         return;
       }
       
-      // Use only the first meaningful analysis to avoid conflicts
-      // This ensures we have dynamic text without multiple filter issues
-      const firstAnalysis = meaningfulAnalyses[0];
-      const timestamp = parseFloat(firstAnalysis.timestamp);
-      const text = this.escapeText(firstAnalysis.analysis);
+      // Create dynamic overlays based on timestamps
+      const overlayFilters = [];
       
-      console.log(`🎯 Using single overlay with first analysis:`);
-      console.log(`   Timestamp: ${timestamp}s`);
-      console.log(`   Text: "${text.substring(0, 50)}..."`);
-      console.log(`   Position: BOTTOM ONLY (y=h-th-20)`);
+      // Add stats overlay (always visible)
+      const statsText = this.createStatsText(meaningfulAnalyses);
+      overlayFilters.push(`drawtext=text='${statsText}':fontsize=18:fontcolor=white:x=20:y=20:shadowcolor=black:shadowx=2:shadowy=2:box=1:boxcolor=black@0.7:boxborderw=5`);
       
-      // Apply single filter with simple text
-      command = command.videoFilters([{
-        filter: 'drawtext',
-        options: {
-          text: text,
-          fontsize: 18,
-          fontcolor: 'white',
-          x: 20,
-          y: 'h-th-20', // BOTTOM ONLY - NO TOP OVERLAYS
-          enable: `gte(t,${timestamp})`, // Show from timestamp onwards
-          shadowcolor: 'black',
-          shadowx: 2,
-          shadowy: 2,
-          box: 1,
-          boxcolor: 'black@0.8',
-          boxborderw: 3
-        }
-      }]);
+      // Add dynamic feedback overlays for each meaningful analysis
+      meaningfulAnalyses.forEach((analysis, index) => {
+        const timestamp = parseFloat(analysis.timestamp);
+        const feedbackText = this.escapeText(analysis.analysis);
+        
+        // Create overlay that appears at specific timestamp and stays for 3 seconds
+        const startTime = timestamp;
+        const endTime = timestamp + 3; // Show for 3 seconds
+        
+        const dynamicOverlay = `drawtext=text='${feedbackText}':fontsize=16:fontcolor=white:x=w/2-tw/2:y=h*0.7:shadowcolor=black:shadowx=2:shadowy=2:box=1:boxcolor=black@0.8:boxborderw=5:enable='between(t,${startTime},${endTime})'`;
+        
+        overlayFilters.push(dynamicOverlay);
+        
+        console.log(`📝 Added dynamic overlay ${index + 1}: "${feedbackText.substring(0, 50)}..." at ${startTime}s-${endTime}s`);
+      });
       
-      console.log(`🎬 Applied single overlay filter to avoid conflicts`);
+      // Combine all filters
+      const filterString = overlayFilters.join(',');
+      
+      console.log(`🎬 Created ${overlayFilters.length} dynamic overlays`);
+      console.log(`🔍 Filter preview: ${filterString.substring(0, 200)}...`);
+      
+      // Apply the video filter
+      command = command.videoFilter(filterString);
       
       // Set output options
       command
-        .outputOptions([
-          '-c:v libx264',
-          '-pix_fmt yuv420p',
-          '-crf 23',
-          '-preset fast'
-        ])
+        .outputOptions(['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'fast'])
         .output(outputPath)
         .on('start', (commandLine) => {
-          console.log('🔄 FFmpeg command with single overlay:');
+          console.log('🔄 FFmpeg command with dynamic overlays:');
           console.log(commandLine);
           
-          // Verify no top overlays in command
-          if (commandLine.includes('y=0') || commandLine.includes('y=10') || commandLine.includes('y=20')) {
-            console.error('🚨 WARNING: Found top positioning in FFmpeg command!');
-          } else {
-            console.log('✅ Confirmed: No top positioning found in command');
-          }
-          
-          // Verify single filter approach
+          // Verify dynamic approach
           const drawtextCount = (commandLine.match(/drawtext/g) || []).length;
-          console.log(`🔍 Drawtext filters found: ${drawtextCount} (should be 1)`);
+          console.log(`🔍 Drawtext filters found: ${drawtextCount} (should be ${overlayFilters.length})`);
         })
         .on('progress', (progress) => {
-          console.log(`📊 Progress: ${progress.percent}% done`);
+          if (progress.percent) {
+            console.log(`📊 Progress: ${progress.percent.toFixed(1)}% done`);
+          }
         })
         .on('end', () => {
-          console.log('✅ Video with single overlay created successfully');
+          console.log('✅ Video with dynamic overlays created successfully');
           console.log(`📁 Output file: ${outputPath}`);
           resolve();
         })
@@ -427,20 +436,210 @@ class VideoProcessor {
   }
 
   summarizeFeedback(frameAnalyses) {
-    const allAnalysis = frameAnalyses.map(f => f.analysis).join(' ');
+    // Check if we have structured data available
+    const structuredData = frameAnalyses.filter(f => f.structuredData).map(f => f.structuredData);
     
-    // Extract key metrics
-    const shotCount = (allAnalysis.match(/shot/gi) || []).length;
-    const madeCount = (allAnalysis.match(/made/gi) || []).length;
-    const missedCount = (allAnalysis.match(/missed/gi) || []).length;
+    if (structuredData.length > 0) {
+      // Use structured data for more accurate statistics
+      let totalShotsMade = 0;
+      let totalShotsMissed = 0;
+      let totalLayupsMade = 0;
+      let shotTypes = [];
+      
+      structuredData.forEach(data => {
+        if (data.shots) {
+          data.shots.forEach(shot => {
+            if (shot.result === 'made') {
+              totalShotsMade++;
+              if (shot.shot_type.toLowerCase().includes('layup')) {
+                totalLayupsMade++;
+              }
+            } else if (shot.result === 'missed') {
+              totalShotsMissed++;
+            }
+            shotTypes.push(shot.shot_type);
+          });
+        }
+      });
+      
+      const totalShots = totalShotsMade + totalShotsMissed;
+      const accuracy = totalShots > 0 ? (totalShotsMade / totalShots * 100).toFixed(1) + '%' : 'N/A';
+      
+      return {
+        totalFrames: frameAnalyses.length,
+        totalShots,
+        totalShotsMade,
+        totalShotsMissed,
+        totalLayupsMade,
+        accuracy,
+        shotTypes: [...new Set(shotTypes)], // Unique shot types
+        hasStructuredData: true
+      };
+    } else {
+      // Fallback to text-based analysis for non-dev mode
+      const allAnalysis = frameAnalyses.map(f => f.analysis).join(' ');
+      
+      // Extract key metrics
+      const shotCount = (allAnalysis.match(/shot/gi) || []).length;
+      const madeCount = (allAnalysis.match(/made/gi) || []).length;
+      const missedCount = (allAnalysis.match(/missed/gi) || []).length;
+      
+      return {
+        totalFrames: frameAnalyses.length,
+        shotCount,
+        madeCount,
+        missedCount,
+        accuracy: shotCount > 0 ? (madeCount / shotCount * 100).toFixed(1) + '%' : 'N/A',
+        hasStructuredData: false
+      };
+    }
+  }
+
+  // Create concatenated text from all analyses
+  createConcatenatedText(analyses) {
+    if (analyses.length === 0) {
+      return '';
+    }
     
-    return {
-      totalFrames: frameAnalyses.length,
-      shotCount,
-      madeCount,
-      missedCount,
-      accuracy: shotCount > 0 ? (madeCount / shotCount * 100).toFixed(1) + '%' : 'N/A'
-    };
+    // Sort analyses by timestamp
+    const sortedAnalyses = analyses.sort((a, b) => parseFloat(a.timestamp) - parseFloat(b.timestamp));
+    
+    console.log(`📝 Creating concatenated text from ${sortedAnalyses.length} analyses:`);
+    
+    // Extract and clean text from each analysis
+    const textParts = sortedAnalyses.map((analysis, index) => {
+      const text = this.escapeText(analysis.analysis);
+      const timestamp = parseFloat(analysis.timestamp);
+      
+      console.log(`   ${index + 1}. ${timestamp}s: "${text.substring(0, 50)}..."`);
+      
+      return text;
+    });
+    
+    // Join all text parts with separators
+    const concatenatedText = textParts.join(' | ');
+    
+    console.log(`📝 Concatenated text created with ${sortedAnalyses.length} parts`);
+    
+    return concatenatedText;
+  }
+
+  // Create stats text for top-left overlay
+  createStatsText(analyses) {
+    // Check if we have structured data available
+    const structuredData = analyses.filter(a => a.structuredData).map(a => a.structuredData);
+    
+    if (structuredData.length > 0) {
+      // Use structured data for accurate statistics
+      let totalShotsMade = 0;
+      let totalShotsMissed = 0;
+      let totalLayupsMade = 0;
+      let totalThreePointers = 0;
+      
+      structuredData.forEach(data => {
+        if (data.shots) {
+          data.shots.forEach(shot => {
+            if (shot.result === 'made') {
+              totalShotsMade++;
+              if (shot.shot_type.toLowerCase().includes('layup')) {
+                totalLayupsMade++;
+              }
+              if (shot.shot_type.toLowerCase().includes('three') || shot.shot_type.toLowerCase().includes('3')) {
+                totalThreePointers++;
+              }
+            } else if (shot.result === 'missed') {
+              totalShotsMissed++;
+            }
+          });
+        }
+      });
+      
+      const totalShots = totalShotsMade + totalShotsMissed;
+      const accuracy = totalShots > 0 ? Math.round((totalShotsMade / totalShots) * 100) : 0;
+      
+      // Use escaped text for FFmpeg
+      return `Shots Made\\: ${totalShotsMade}\\nShots Missed\\: ${totalShotsMissed}\\nAccuracy\\: ${accuracy}%\\nLayups\\: ${totalLayupsMade}\\n3-Pointers\\: ${totalThreePointers}`;
+    } else {
+      // Fallback to text-based analysis
+      const madeCount = analyses.filter(a => 
+        a.analysis.toLowerCase().includes('made') || 
+        a.analysis.toLowerCase().includes('good') ||
+        a.analysis.toLowerCase().includes('great') ||
+        a.analysis.toLowerCase().includes('nice') ||
+        a.analysis.toLowerCase().includes('perfect')
+      ).length;
+      
+      const missedCount = analyses.filter(a => 
+        a.analysis.toLowerCase().includes('missed') || 
+        a.analysis.toLowerCase().includes('miss') ||
+        a.analysis.toLowerCase().includes('off') ||
+        a.analysis.toLowerCase().includes('wrong')
+      ).length;
+      
+      const totalShots = madeCount + missedCount;
+      const accuracy = totalShots > 0 ? Math.round((madeCount / totalShots) * 100) : 0;
+      
+      // Use escaped text for FFmpeg
+      return `Shots Made\\: ${madeCount}\\nShots Missed\\: ${missedCount}\\nAccuracy\\: ${accuracy}%`;
+    }
+  }
+
+  // Create rotating feedback text that changes every 3 seconds
+  createRotatingFeedback(analyses) {
+    if (analyses.length === 0) {
+      return 'No feedback available';
+    }
+    
+    // Check if we have structured data available
+    const structuredData = analyses.filter(a => a.structuredData).map(a => a.structuredData);
+    
+    if (structuredData.length > 0) {
+      // Extract feedback from structured data
+      const allFeedback = [];
+      
+      structuredData.forEach(data => {
+        if (data.shots) {
+          data.shots.forEach(shot => {
+            if (shot.feedback && shot.feedback.trim()) {
+              allFeedback.push(shot.feedback);
+            }
+          });
+        }
+      });
+      
+      if (allFeedback.length > 0) {
+        // Take the first few feedback items and combine them
+        const selectedFeedback = allFeedback.slice(0, 3); // Only use first 3 to keep it simple
+        
+        const feedbackParts = selectedFeedback.map((feedback, index) => {
+          const cleanText = this.escapeText(feedback);
+          return cleanText;
+        });
+        
+        // Join with separators for a rotating effect
+        const rotatingText = feedbackParts.join(' | ');
+        
+        console.log(`📝 Created rotating feedback with ${selectedFeedback.length} structured feedback items`);
+        
+        return rotatingText;
+      }
+    }
+    
+    // Fallback to text-based analysis
+    // Take the first few meaningful analyses and combine them
+    const selectedAnalyses = analyses.slice(0, 3); // Only use first 3 to keep it simple
+    
+    const feedbackParts = selectedAnalyses.map((analysis, index) => {
+      const cleanText = this.escapeText(analysis.analysis);
+      return cleanText;
+    });
+    
+    // Join with separators for a rotating effect
+    const rotatingText = feedbackParts.join(' | ');
+    
+    console.log(`📝 Created rotating feedback with ${selectedAnalyses.length} parts`);
+    
+    return rotatingText;
   }
 }
 
